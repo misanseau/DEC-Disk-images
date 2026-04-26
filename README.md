@@ -19,8 +19,13 @@ Version 0.3 adds:
 - **`DIR` for ODS-1 (RSX) volumes**: bare `DIR A:` on a Files-11 disk
   walks the MFD and lists every UFD as `[g,m]`; `DIR A:[g,m]` enters
   that UFD and lists the files inside.
+- **`DIR` for RSTS/E packs (first cut)**: `DIR A:` on a RSTS/E disk
+  decodes the pack label (RDS level, PCS/DCS, pack ID) and reports
+  the PPN accounts visible in the first MFD cluster.  Full GFD/UFD
+  walking is on the to-do list.
 - Internal refactor: `DIR` lives in its own `cmd_dir.c` module, with
-  `cmd_ods1_dir.c` housing the ODS-1 walker.
+  `cmd_ods1_dir.c` housing the ODS-1 walker and `rsts.c` the RSTS
+  pack-label decoder.
 
 The program implements the full set of commands from the specification:
 
@@ -89,7 +94,7 @@ From a *x64 Native Tools Command Prompt for VS 2022*:
 ```
 cl /nologo /W4 /TC /std:c11 /D_CRT_SECURE_NO_WARNINGS ^
    main.c commands.c cmd_dir.c cmd_ods1_dir.c mount.c mt.c ods1.c ^
-   rad50.c rt11.c tar.c util.c /Fe:rt11dv.exe
+   rad50.c rsts.c rt11.c tar.c util.c /Fe:rt11dv.exe
 ```
 
 ## Usage examples
@@ -169,6 +174,7 @@ rt11dv/
     ├── cmd_internal.h         # internal interface for cmd_*.c sub-modules
     ├── cmd_dir.c              # DIR command (host + DV + MT + TAR dispatch)
     ├── cmd_ods1_dir.c         # DIR for Files-11 ODS-1 (MFD + UFD walker)
+    ├── rsts.c/.h              # RSTS/E pack-label + first-cut MFD scan
     ├── rt11.c/.h              # RT-11 filesystem core (random access, DV)
     ├── mt.c/.h                # RT-11 FSM magtape + SIMH .tap container
     ├── tar.c/.h               # POSIX ustar (.tar) read-only listing
@@ -318,6 +324,68 @@ Caveats / future work:
 - Map-area extension headers are not yet followed: a UFD whose first
   header is full will list the first batch only.
 - COPY and write paths are not yet implemented for ODS-1 volumes.
+
+## RSTS/E pack DIR (first cut)
+
+When `DIR A:` is run on a disk image that sniffs as an RSTS/E pack
+(USED flag at offset 2 of DCN 1, sane RDS level + power-of-two PCS +
+printable RAD-50 pack ID), `rt11dv` prints the pack header and the
+PPN entries it can spot in the first MFD cluster:
+
+```
+> MOUNT system.dsk A:
+Mounted system.dsk on A:
+> DIR A:
+ Pack: SYSTEM  (RSTS/E RDS 0.0)
+  PCS=16  DCS=4  MFD LBN=4  Pack status=0x4800
+
+  Account / blockette PPN scan (first MFD cluster only)
+  Blkt   PPN     Link   Words 4..7 (RAD-50 / hex)
+  ----   -----   ----   --------------------------
+  [01]  [  1,  1]  0030   SYSTEM   (7abb 7dd5)
+  [03]  [  0,  1]  0050   SYSTEM   (7abb 7dd5)
+  [05]  [  1,  2]  0080   SYSTEM   (7abb 7dd5)
+  ...
+  Note: full GFD/UFD/file walking is not yet implemented.
+```
+
+What's done:
+
+- DCS auto-computation from the pack size.
+- Pack label decode (RDS level, PCS, pack status, pack ID).
+- Both RDS 0.0 (block 1 = MFD start) and RDS 1.X packs sniff as RSTS.
+- **Stage 2 + 3:** linked-chain walk through MFD entries with full
+  per-account UFD descent.  Entries are decoded against the
+  authoritative Mayfield "RSTS/E Monitor Internals" ch.1 layout:
+  - MFD Name Entry: PPN, password (RAD-50 6 chars), USTAT bits,
+    accounting link, **UAR = DCN of UFD's first cluster**.
+  - Each non-empty UFD is opened (UFD_LBN = UAR * DCS) and its Name
+    Entries are walked: filename.ext (RAD-50 9 chars), USTAT/UPROT,
+    accounting entry → file size in blocks, creation date (RSTS
+    internal date `(year-1970)*1000 + day_of_year`), creation time
+    (RSTS minutes-until-midnight encoding), RTS name, file cluster size.
+
+  Sample output against rsts.dsk (SYSTEM pack):
+
+  ```
+  Pack: SYSTEM  (RSTS/E RDS 0.0)
+   PCS=16  DCS=4  MFD LBN=4  Pack status=0x4800
+
+  [  1,  1]  pass=SYSTEM  stat=NK+NX+UFD  acc=0020  UFD-DCN=0001  -> UFD@LBN=4
+      INDEXF.SYS    16   1-Jul-1997   23:45    BASIC    prot=060  ...
+      ...
+  [122,187]  pass=LIBOLB  stat=-          acc=0070  UFD-DCN=0090  -> UFD@LBN=576
+      <files in [122,187]>
+  ```
+
+What's still pending:
+
+- Walk MFD blocks beyond the first cluster (chase the cluster map at
+  offset 0x1F0 to find continuation blocks for very large directories).
+- Walk UFD blocks beyond the first cluster (same cluster-map scheme).
+- Follow `URTS=0` large-file convention to compute >65535-block sizes.
+- Decode the Retrieval Entries (DCN of cluster n+0..n+6) to enable
+  COPY out from RSTS/E volumes.
 
 ## Limitations / future work
 
