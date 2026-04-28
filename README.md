@@ -1,14 +1,10 @@
-# rt11dv  (WORK IN PROGRESS)
+# rt11dv	(WORK IN PROGRESS 29-APR-2026)
 
-Console utility for **Win32 (Visual Studio 2022)** that manipulates
-`.dsk` image files in the **DEC RT-11 / TSX+** filesystem format
-("virtual disks", DV) and SIMH `.tap` container files in the
-**RT-11 File-Structured Magtape (FSM)** format ("MT:"). Written in
-plain C11, no third-party dependencies, no MFC, no ATL.
-
-Version 0.2 adds FSM magtape support (MOUNT/FORMAT/DIR/COPY on `MT:`)
-and re-bases the `DIR` command so that it inspects the host filesystem
-when no device is given.
+Console utility for Win32/Linux that manipulates ".dsk" image files 
+in the DEC RT-11 / TSX+ / RSX-11 / RSTS-11 filesystem format 
+("virtual disks", DV) and SIMH ".tap" container files in the
+RT-11 File-Structured Magtape (FSM) format ("MT:"). 
+Written in plain C11, no third-party dependencies, no MFC, no ATL.
 
 Version 0.4 adds:
 
@@ -121,7 +117,7 @@ addressable as `MT:` for `DIR`, `FORMAT` and `COPY`. Tape files are
 sequential, so tape-to-tape `COPY` is not supported and a tape is
 always treated as one pass of data records.
 
-Mount and drive-letter assignments live **in memory** for the duration
+Mount and drive-letter assignments live "in memory" for the duration
 of one process invocation, so the REPL is where the full workflow
 shines:
 
@@ -336,12 +332,12 @@ Mounted kit.tar on T:
 
 Caveats:
 
-- **Read-only.**  Only `DIR` is implemented; `COPY` from inside a
+- "Read-only."  Only `DIR` is implemented; `COPY` from inside a
   `.tar` is not yet wired up.  Extract first with the host `tar` tool.
-- **No transparent decompression.**  `.tar.gz` / `.tar.xz` / `.tar.bz2`
+- "No transparent decompression."  `.tar.gz` / `.tar.xz` / `.tar.bz2`
   are detected by their magic bytes and rejected with a clear message
   ("looks like a gzip-compressed file, decompress first").
-- **Long names** (>100 chars) are reconstructed from the GNU `'L'`
+- "Long names" (>100 chars) are reconstructed from the GNU `'L'`
   extension when present.  POSIX prefix+name splitting is also
   honoured.  PAX `'x'`/`'g'` extended headers are skipped (the
   underlying `name` field is shown instead of any `path=` override).
@@ -417,18 +413,18 @@ What's done:
 - DCS auto-computation from the pack size.
 - Pack label decode (RDS level, PCS, pack status, pack ID).
 - Both RDS 0.0 (block 1 = MFD start) and RDS 1.X packs sniff as RSTS.
-- **Stage 2 + 3:** linked-chain walk through MFD entries with full
+- "Stage 2 + 3:" linked-chain walk through MFD entries with full
   per-account UFD descent.  Entries are decoded against the
   authoritative Mayfield "RSTS/E Monitor Internals" ch.1 layout:
   - MFD Name Entry: PPN, password (RAD-50 6 chars), USTAT bits,
-    accounting link, **UAR = DCN of UFD's first cluster**.
+    accounting link, "UAR = DCN of UFD's first cluster".
   - Each non-empty UFD is opened (UFD_LBN = UAR * DCS) and its Name
     Entries are walked: filename.ext (RAD-50 9 chars), USTAT/UPROT,
     accounting entry → file size in blocks, creation date (RSTS
     internal date `(year-1970)*1000 + day_of_year`), creation time
     (RSTS minutes-until-midnight encoding), RTS name, file cluster size.
 
-- **Stage 4:** account vs file distinction via `US.UFD` bit (0x40) of
+- "Stage 4:" account vs file distinction via `US.UFD` bit (0x40) of
   USTAT.  In RDS 0.0 the MFD doubles as the UFD for [1,1], so a single
   link chain mixes account-pointer entries (US.UFD=1) and file entries
   (US.UFD=0); Stage 4 dispatches accordingly.  After scanning the MFD,
@@ -467,7 +463,7 @@ What's done:
     SQRT  .BAS       1 blk   6-Jun-1998 16:49  RTS=BASIC
   ```
 
-- **Stage 5:** multi-block directory walks via the cluster map at
+- "Stage 5:" multi-block directory walks via the cluster map at
   offset 0x1F0 of every directory block (Mayfield 1.2.4 / 1.2.10).
   The link-word decoder follows the (block, cluster, entry, flags)
   packing per Mayfield 1.2.12, with target LBN computed as
@@ -484,7 +480,7 @@ What's done:
   | sysl1g.dsk   | 4        | 184   |  8 409      |
   | patchg.dsk   | 3        | 718   |  2 216      |
 
-- **COPY out**: `COPY R:[g,p]NAME.EXT host.path` extracts a file from a
+- "COPY out": `COPY R:[g,p]NAME.EXT host.path` extracts a file from a
   mounted RSTS/E pack.  Walks MFD to find the account, the UFD to find
   the file, then follows the Retrieval Entry chain (ULNK + 7 cluster
   DCNs per blockette) to write `min(USIZ, FCS×clusters) × 512` bytes
@@ -520,18 +516,20 @@ What's still pending:
 The on-disk layout and command semantics follow the DEC RT-11 V&FF
 manual. Useful cross-checks while writing this implementation:
 
-- **rt11fsLib** - VxWorks-era RT-11 filesystem library; a concise C
+- "rt11fsLib" - VxWorks-era RT-11 filesystem library; a concise C
   implementation of the same directory/home-block walk used here.
-- **kgober/FSX** ("File System Exchange") - a general-purpose utility
+- "kgober/FSX" ("File System Exchange") - a general-purpose utility
   for poking around disk images from many vintage operating systems,
   including RT-11. Good reference for the directory-segment walk and
   the RADIX-50 conversions.
-- **AA-PD6PA-TC RT-11 Volume and File Formats Manual (Aug 91)** -
+- "AA-PD6PA-TC RT-11 Volume and File Formats Manual (Aug 91)" -
   sections 1.2 *Sequential-Access Volumes* and 1.2.1.1 *RT-11
   File-Structured Magtape Format*. The on-tape VOL1/HDR1/EOF1 label
   content and the data-record layout implemented in `mt.c` follow the
   tables in this reference.
-- **SIMH .tap container** - the de-facto standard disk container for
+- "SIMH .tap container" - the de-facto standard disk container for
   emulated magtape images used by `simh`, `E11`, `PUTR`, etc.
+- Michael Mayfield. "RSTS/E monitor internals"; Northwest Digital Software,
+  nov 1982; apply to RSTS/E v7,0, 7.1 and 7.2.
 
   ---- end ----
