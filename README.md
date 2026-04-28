@@ -1,4 +1,4 @@
-# rt11dv	27 aper
+# rt11dv
 
 Console utility for **Win32 (Visual Studio 2022)** that manipulates
 `.dsk` image files in the **DEC RT-11 / TSX+** filesystem format
