@@ -10,7 +10,66 @@ Version 0.2 adds FSM magtape support (MOUNT/FORMAT/DIR/COPY on `MT:`)
 and re-bases the `DIR` command so that it inspects the host filesystem
 when no device is given.
 
-Version 0.3 adds:
+Version 0.4 adds:
+
+- **`COPY R:[g,p]NAME.EXT host.path`** + **wildcard variant**
+  `COPY R:[g,p]*.EXT host_dir/`: extract one file or many from a
+  mounted RSTS/E pack to a host file or directory.  `host_dir` is
+  auto-created (single level of mkdir) if it doesn't already exist.
+- **`COPY A:[g,m]NAME.EXT host.path`** + wildcard for **ODS-1 (RSX)**:
+  same syntax for Files-11 packs.  Walks the file's map area to copy
+  each retrieval extent.
+- **RSTS/E COPY IN**: `COPY host.txt R:[g,p]NAME.EXT [/DR]`.  Locates
+  SATT.SYS in [0,1], finds a contiguous run of free PCN bits,
+  allocates 3 blockettes in the target UFD (Name + Accounting +
+  Retrieval), patches the previous Name Entry tail's ULNK, writes the
+  data and updates SATT.SYS.  `/DR` runs a dry-run.  Limitations:
+  file must fit in <=7 file clusters (single Retrieval Entry; FCS=PCS,
+  so for PCS=16 the cap is 7*16*512 = 56 KB; for PCS=1, only 3.5 KB);
+  UFD must already have 3 free 16-byte blockettes; no
+  name-collision detection.  **Always test on a copy first.**
+- **ODS-1 (RSX) COPY IN**: `COPY host.txt A:[g,m]NAME.EXT [/DR]`.
+  Allocates a fresh FID via the index file bitmap, allocates N
+  contiguous blocks via BITMAP.SYS, builds a File Header Block (with
+  RAD-50 9.3 filename, default protection, current date/time, single
+  retrieval pointer, additive checksum), writes the data and the
+  dirent into the UFD.  `/DR` runs a dry-run (prints the plan: which
+  bitmap bits would flip, which LBN gets the FH, etc.) without
+  touching the disk image.  Limitations: single contiguous extent,
+  UFD must already have a free 16-byte slot, no version-collision
+  detection.  **Always test on a copy of the disk first.**
+- **TAR COPY IN**: `COPY host.txt T:` (or `COPY host.txt T:newname`)
+  appends a host file to a mounted `.tar` archive as a ustar entry.
+  Walks the existing entries to find the first zero block, overwrites
+  the end-of-archive marker with: 1 USTAR header + ceil(size/512)
+  data blocks + 2 fresh trailing zero blocks.  File mode hardcoded to
+  0644; mtime preserved from the host file's stat.  Names > 99 chars
+  rejected (GNU long-name on write not yet implemented).
+- **`CD` / `PWD`** for navigating hierarchical volumes (RSTS/E and
+  ODS-1).  Each mount carries its own working directory:
+
+  ```
+  > CD A:[1,2]      ! set cwd of A: to UFD [1,2]
+  > DIR A:          ! same as DIR A:[1,2]
+  > COPY A:*.SAV ./ ! same as COPY A:[1,2]*.SAV ./
+  > CD ..           ! pop cwd of last-CD'd drive (back to MFD)
+  > PWD             ! show cwd of every mount + focus drive
+  ```
+
+  CD .. and a bare CD [g,p] target the "focus" drive, which is the
+  last drive mentioned with a qualified `CD <letter>:...`.  Walks MFD -> account -> UFD -> file's
+  Retrieval Entry chain (ULNK + 7 cluster DCNs per blockette) to
+  enumerate every file cluster (FCS contiguous blocks per DCN) and
+  writes the data out, capped by the file's USIZ (or the URTS=0
+  large-file convention for >65535-block files).  Verified by
+  extracting `[0,1]INIT.SYS` from `rsts.dsk` (419 blocks / 214528
+  bytes) and confirming the known RSTS error strings appear.
+- **`VER` output now includes platform + build type**: e.g. `version
+  0.4 x64 rel  (built ...)`.  Compile-time detection of x32/x64 and
+  release/debug, works under both MSVC (`_WIN64`/`_DEBUG`) and
+  GCC/clang (`__x86_64__`/`__LP64__` and `DEBUG`/`NDEBUG`).
+
+Version 0.3 added:
 
 - Read-only support for **POSIX ustar (`.tar`) archives**: `MOUNT foo.tar
   T:` followed by `DIR T:` prints the archive's table of contents.
@@ -40,7 +99,7 @@ The program implements the full set of commands from the specification:
 | `COPY`   |     | Copy a file between host and DV or host and MT: (either direction); `*` reuses the name from the other side |
 | `UMOUNT` | `U` | Dismount |
 | `LIST`   | `L` | Show current mount / assignment table (shows DV vs MT kind) |
-| `VER`    | `V` | Print version and compile-time build date/time |
+| `VER`    | `V` | Print version + platform + build type (x32/x64 rel/deb) and compile-time build date/time |
 | `HELP`   | `?` | Print help |
 | `EXIT` / `QUIT` | | Leave the REPL |
 
@@ -316,11 +375,11 @@ Mounted rsx-src.dsk on A:
 
 Caveats / future work:
 
-- File numbers > 16 use a naive linear LBN computation (`iblb + ibsz +
-  fnum-1`) that assumes INDEXF.SYS is contiguous.  This is true on most
-  freshly-INITIALIZE'd packs but a fragmented INDEXF could leave the
-  walker reading the wrong header for high FIDs.  Proper INDEXF.SYS
-  retrieval-pointer chasing is on the to-do list.
+- File numbers > 16 are now resolved via a true INDEXF.SYS retrieval
+  walk (cached at the start of every `DIR`) so fragmented INDEXFs
+  work correctly and out-of-range FIDs are detected instead of
+  reading garbage.  Falls back to the historical naive linear formula
+  if INDEXF.SYS itself can't be parsed.
 - Map-area extension headers are not yet followed: a UFD whose first
   header is full will list the first batch only.
 - COPY and write paths are not yet implemented for ODS-1 volumes.
@@ -365,27 +424,75 @@ What's done:
     internal date `(year-1970)*1000 + day_of_year`), creation time
     (RSTS minutes-until-midnight encoding), RTS name, file cluster size.
 
-  Sample output against rsts.dsk (SYSTEM pack):
+- **Stage 4:** account vs file distinction via `US.UFD` bit (0x40) of
+  USTAT.  In RDS 0.0 the MFD doubles as the UFD for [1,1], so a single
+  link chain mixes account-pointer entries (US.UFD=1) and file entries
+  (US.UFD=0); Stage 4 dispatches accordingly.  After scanning the MFD,
+  each account with `UAR != 0` and PPN != [1,1] is recursively walked
+  as a UFD.  URTS=0 large-file convention (file size = (URTS2<<16) |
+  USIZ) is honoured.  Cross-block links are detected and warned about
+  (multi-block walks come in Stage 5).
+
+  Sample output against rsts.dsk (SYSTEM, 67 MB):
 
   ```
   Pack: SYSTEM  (RSTS/E RDS 0.0)
-   PCS=16  DCS=4  MFD LBN=4  Pack status=0x4800
+    PCS=16  DCS=4  MFD LBN=4  Pack status=0x4800
 
-  [  1,  1]  pass=SYSTEM  stat=NK+NX+UFD  acc=0020  UFD-DCN=0001  -> UFD@LBN=4
-      INDEXF.SYS    16   1-Jul-1997   23:45    BASIC    prot=060  ...
-      ...
-  [122,187]  pass=LIBOLB  stat=-          acc=0070  UFD-DCN=0090  -> UFD@LBN=576
-      <files in [122,187]>
+  [ MFD walk -- accounts and intermixed [1,1] files ]
+  ACCT  [  1,  1]  pass=SYSTEM   stat=UFD+NK+NX  UAR=1     -> UFD@LBN=4
+  ACCT  [  0,  1]  pass=SYSTEM   stat=UFD+NK+NX  UAR=5     -> UFD@LBN=20
+  ACCT  [  1,  2]  pass=SYSTEM   stat=UFD+NK+NX  UAR=229   -> UFD@LBN=916
+    FILE  SYSLIB.OLB     182 blk  23-Sep-1979 17:37  RTS=RSX
+    FILE  RSXMAC.SML     153 blk  23-Sep-1979 17:12  RTS=RSX
+    FILE  CSPCOM.OLB     207 blk  19-Sep-1979 15:56  RTS=RSX
+    FILE  ODT   .OBJ       9 blk   6-Jun-1998 16:05
+  ACCT  [100,  1]  pass=SYSTEM   stat=UFD+NK+NX  UAR=2901  -> UFD@LBN=11604
+
+  [ UFD [0,1] @LBN=20 ]
+    BADB  .SYS       0 blk   6-Jun-1998 13:36  RTS=RSTS
+    SATT  .SYS       3 blk   6-Jun-1998 13:36  RTS=RSTS
+    INIT  .SYS     419 blk   6-Jun-1998 13:31  RTS=RSTS
+    ERR   .ERR      16 blk   6-Jun-1998 13:31  RTS=RSTS
+    RSTS  .SIL     307 blk   6-Jun-1998 14:09  RTS=RT11
+    BASIC .RTS      73 blk   6-Jun-1998 14:09  RTS=RT11
+    RT11  .RTS      20 blk   6-Jun-1998 13:31  RTS=RSTS
+    SWAP  .SYS    1024 blk   6-Jun-1998 14:37  RTS=RSTS
+
+  [ UFD [100,1] @LBN=11604 ]
+    SQRT  .BAS       1 blk   6-Jun-1998 16:49  RTS=BASIC
   ```
+
+- **Stage 5:** multi-block directory walks via the cluster map at
+  offset 0x1F0 of every directory block (Mayfield 1.2.4 / 1.2.10).
+  The link-word decoder follows the (block, cluster, entry, flags)
+  packing per Mayfield 1.2.12, with target LBN computed as
+  `cluster_map[link.cluster]_DCN * DCS + link.block`.  The
+  accounting-blockette read also crosses blocks, so file size,
+  date, time and RTS now populate for every entry, not just those
+  whose accounting happens to live in the same block as the name
+  entry.  Realistic file counts and totals:
+
+  | Pack         | Accounts | Files | Blocks used |
+  | ------------ | -------- | ----- | ----------- |
+  | rsts.dsk     | 4        | 389   | 18 267      |
+  | sysgng.dsk   | 3        | 169   |  7 923      |
+  | sysl1g.dsk   | 4        | 184   |  8 409      |
+  | patchg.dsk   | 3        | 718   |  2 216      |
+
+- **COPY out**: `COPY R:[g,p]NAME.EXT host.path` extracts a file from a
+  mounted RSTS/E pack.  Walks MFD to find the account, the UFD to find
+  the file, then follows the Retrieval Entry chain (ULNK + 7 cluster
+  DCNs per blockette) to write `min(USIZ, FCS×clusters) × 512` bytes
+  to the host file.  Verified by extracting `[0,1]INIT.SYS` from
+  `rsts.dsk` (419 blocks / 214528 bytes) and confirming all the known
+  RSTS/E error strings ("INIT bug - SATT.SYS non-existent at time of
+  WOMP", bootable-device list, etc.) appear in the output.
 
 What's still pending:
 
-- Walk MFD blocks beyond the first cluster (chase the cluster map at
-  offset 0x1F0 to find continuation blocks for very large directories).
-- Walk UFD blocks beyond the first cluster (same cluster-map scheme).
-- Follow `URTS=0` large-file convention to compute >65535-block sizes.
-- Decode the Retrieval Entries (DCN of cluster n+0..n+6) to enable
-  COPY out from RSTS/E volumes.
+- COPY *in* (host -> RSTS): requires SATT.SYS allocation + creating
+  Name/Accounting/Retrieval blockettes in the UFD.
 
 ## Limitations / future work
 
